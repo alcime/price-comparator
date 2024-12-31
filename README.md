@@ -18,6 +18,7 @@ Before you begin, ensure you have the following installed on your computer:
 - Node.js (v16 or higher) - [Download here](https://nodejs.org/)
 - npm (Node Package Manager - comes with Node.js)
 - Git - [Download here](https://git-scm.com/downloads)
+- (optionnal) Github Desktop
 
 To verify your installations, open a terminal/command prompt and run:
 
