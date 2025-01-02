@@ -2,6 +2,7 @@
 import { BrowserRouter, Routes, Route, Link } from 'react-router-dom';
 import GroceryDashboard from './components/GroceryDashboard';
 import RecipePage from './components/RecipePage';
+import './styles/globals.css'
 
 function App() {
   return (
