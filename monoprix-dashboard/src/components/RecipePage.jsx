@@ -8,6 +8,7 @@ import { Loader2, UtensilsCrossed, X, ChevronUp, ChevronDown, Copy, FileDown } f
 import Papa from 'papaparse';
 
 const RecipePage = () => {
+  // State declarations
   const [products, setProducts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [recipe, setRecipe] = useState('');
@@ -16,6 +17,20 @@ const RecipePage = () => {
   const [results, setResults] = useState(null);
   const [excludedProducts, setExcludedProducts] = useState(new Set());
   const [servings, setServings] = useState(4);
+
+  const PIECE_TO_WEIGHT = {
+    'oignon': 150,    // 150g per onion
+    'pomme': 200,     // 200g per apple
+    'ail': 30,        // 30g per garlic head
+    'citron': 100,    // 100g per lemon
+    'orange': 150,    // 150g per orange
+    'banane': 120,    // 120g per banana
+    'poireau': 200,   // 200g per leek
+    'carotte': 100,   // 100g per carrot
+    'courgette': 200  // 200g per zucchini
+  };
+
+  // Example recipes data
   const exampleRecipes = [
     {
       name: "Tarte aux Pommes Classique",
@@ -39,6 +54,253 @@ const RecipePage = () => {
 1 pincée de poivre`
     }
   ];
+
+  // Helper functions
+  const standardizeUnit = (value, unit) => {
+    unit = unit.toLowerCase();
+    // Weight conversions
+    if (unit === 'kg') return value * 1000;
+    if (unit === 'g') return value;
+    // Volume conversions
+    if (unit === 'l') return value * 1000;
+    if (unit === 'ml' || unit === 'cl') return unit === 'cl' ? value * 10 : value;
+    // Handle teaspoon/tablespoon approximations
+    if (unit === 'tsp' || unit === 'càc') return value * 5; // ~5g per teaspoon
+    if (unit === 'tbsp' || unit === 'càs') return value * 15; // ~15g per tablespoon
+    // Keep original for pieces/units
+    return value;
+  };
+  const parseProductSize = (sizeStr) => {
+    if (!sizeStr) return null;
+    
+    // Common patterns: "1kg", "500g", "1L", "500ml", "6x1.5L", "pack 6", etc.
+    const sizeRegex = /(\d+(?:\.\d+)?)\s*(kg|g|l|ml|cl|piece|pièce|pieces|pièces)/i;
+    const match = sizeStr.toLowerCase().match(sizeRegex);
+    
+    if (!match) return null;
+    
+    const [_, value, unit] = match;
+    return {
+      value: parseFloat(value),
+      unit: unit.toLowerCase()
+    };
+  };
+
+  const parsePackSize = (sizeStr) => {
+    if (!sizeStr) return null;
+  
+    // Handle "X par pack" format
+    const packMatch = sizeStr.match(/(\d+)\s*par\s*pack/i);
+    if (packMatch) {
+      return {
+        value: parseInt(packMatch[1]),
+        unit: 'piece',
+        isPackaging: true
+      };
+    }
+  
+    // Handle standard measurements
+    const sizeRegex = /(\d+(?:\.\d+)?)\s*(kg|g|l|ml|cl|piece|pièce|pieces|pièces)/i;
+    const match = sizeStr?.toLowerCase().match(sizeRegex);
+    
+    if (!match) return null;
+    
+    const [_, value, unit] = match;
+    return {
+      value: parseFloat(value),
+      unit: unit.toLowerCase(),
+      isPackaging: false
+    };
+  };
+
+  const calculateProportionalPrice = (match) => {
+    if (!match.selectedProduct) return 0;
+  
+    const product = match.selectedProduct;
+    const ingredient = match.ingredient;
+    const productSize = parsePackSize(product.size_value);
+  
+    if (!productSize) return product.price_eur;
+  
+    // Handle items sold in pieces/packs
+    if (ingredient.unit.toLowerCase().includes('piece') || 
+        ingredient.unit.toLowerCase().includes('pièce')) {
+      
+      if (productSize.isPackaging) {
+        // For packaged items (like eggs sold in dozens)
+        const ratio = ingredient.amount / productSize.value;
+        return product.price_eur * ratio;
+      } else if (productSize.unit.includes('g') || productSize.unit.includes('kg')) {
+        // For items sold by weight but recipe asks for pieces
+        const averageWeight = PIECE_TO_WEIGHT[ingredient.name.toLowerCase()];
+        if (averageWeight) {
+          // Convert pieces to weight and calculate ratio
+          const totalWeightNeeded = ingredient.amount * averageWeight;
+          const productWeight = standardizeUnit(productSize.value, productSize.unit);
+          return (totalWeightNeeded / productWeight) * product.price_eur;
+        }
+      }
+    }
+  
+    // Handle weight-based measurements (rest of the logic remains the same)
+    const isWeight = ['g', 'kg'].includes(ingredient.unit.toLowerCase());
+    const isVolume = ['ml', 'l', 'cl', 'tsp', 'tbsp', 'càc', 'càs'].includes(ingredient.unit.toLowerCase());
+    const isProductWeight = ['g', 'kg'].includes(productSize.unit);
+    const isProductVolume = ['ml', 'l', 'cl'].includes(productSize.unit);
+  
+    // Convert everything to standard unit (grams or milliliters)
+    const requiredAmount = standardizeUnit(ingredient.amount, ingredient.unit);
+    const productAmount = standardizeUnit(productSize.value, productSize.unit);
+  
+    // Handle measurement conversions
+    if ((isWeight && isProductWeight) || (isVolume && isProductVolume)) {
+      return (requiredAmount / productAmount) * product.price_eur;
+    }
+  
+    return product.price_eur;
+  };
+
+  const getTotalCost = () => {
+    if (!results) return 0;
+    return results.matches.reduce((total, match) => {
+      if (excludedProducts.has(match.selectedProduct?.productId)) {
+        return total;
+      }
+      return total + calculateProportionalPrice(match);
+    }, 0).toFixed(2);
+  };
+
+  const toggleExcludeProduct = (productId) => {
+    setExcludedProducts(prev => {
+      const newSet = new Set(prev);
+      if (newSet.has(productId)) {
+        newSet.delete(productId);
+      } else {
+        newSet.add(productId);
+      }
+      return newSet;
+    });
+  };
+
+  const adjustServings = (newServings) => {
+    if (newServings < 1) return;
+    const ratio = newServings / servings;
+    
+    if (!results) return;
+    
+    const adjustedResults = {
+      ...results,
+      servings: newServings,
+      matches: results.matches.map(match => ({
+        ...match,
+        ingredient: {
+          ...match.ingredient,
+          amount: (match.ingredient.amount * ratio).toFixed(1)
+        }
+      }))
+    };
+    
+    setServings(newServings);
+    setResults(adjustedResults);
+  };
+
+  const exportShoppingList = () => {
+    if (!results) return;
+    
+    const list = [
+      `Liste de courses - ${new Date().toLocaleDateString('fr-FR')}`,
+      `Pour ${results.servings} personnes`,
+      '',
+      ...results.matches
+        .filter(m => !excludedProducts.has(m.selectedProduct?.productId))
+        .map(m => {
+          if (!m.selectedProduct) return `${m.ingredient.name} - Produit non trouvé`;
+          return `${m.selectedProduct.name} - ${m.ingredient.amount}${m.ingredient.unit} - €${calculateProportionalPrice(m).toFixed(2)}`;
+        }),
+      '',
+      `Total: €${getTotalCost()}`
+    ].join('\n');
+    
+    const blob = new Blob([list], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'liste-courses.txt';
+    a.click();
+  };
+
+  const renderProductCard = (match, index) => (
+    <Card 
+      key={index}
+      className={`border-0 shadow-md transition-all duration-200 ${
+        excludedProducts.has(match.selectedProduct?.productId) 
+          ? 'opacity-50' 
+          : ''
+      }`}
+    >
+      <CardContent className="p-4">
+        <div className="flex justify-between items-start mb-3">
+          <div>
+            <h3 className="font-medium text-lg">
+              {match.ingredient.name}
+            </h3>
+            <p className="text-gray-500">
+              {match.ingredient.amount} {match.ingredient.unit}
+            </p>
+          </div>
+          
+          {match.selectedProduct && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => toggleExcludeProduct(match.selectedProduct.productId)}
+              className="text-gray-500 hover:text-gray-700"
+            >
+              <X className="h-4 w-4" />
+            </Button>
+          )}
+        </div>
+
+        {match.selectedProduct ? (
+          <div className="flex items-center gap-4">
+            {match.selectedProduct.image_src && (
+              <img
+                src={match.selectedProduct.image_src}
+                alt={match.selectedProduct.name}
+                className="w-20 h-20 object-cover rounded-lg border border-gray-100"
+              />
+            )}
+            
+            <div className="flex-1">
+              <p className="text-sm text-gray-600 mb-1">
+                {match.selectedProduct.name}
+                {match.selectedProduct.size_value && (
+                  <span className="text-gray-500"> • {match.selectedProduct.size_value}</span>
+                )}
+              </p>
+              <div className="space-y-1">
+                <p className="text-lg font-semibold text-blue-600">
+                  €{calculateProportionalPrice(match).toFixed(2)}
+                </p>
+                <p className="text-sm text-gray-500">
+                  (Prix du produit: €{match.selectedProduct.price_eur?.toFixed(2)})
+                </p>
+              </div>
+              {!match.compatible && (
+                <p className="text-yellow-600 text-sm mt-1 flex items-center gap-1">
+                  ⚠️ Quantité différente disponible
+                </p>
+              )}
+            </div>
+          </div>
+        ) : (
+          <div className="bg-red-50 text-red-600 rounded-lg p-3 text-sm">
+            Produit non trouvé
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
 
   // Load product data on mount
   useEffect(() => {
@@ -158,74 +420,17 @@ const RecipePage = () => {
     }
   };
 
-  const toggleExcludeProduct = (productId) => {
-    setExcludedProducts(prev => {
-      const newSet = new Set(prev);
-      if (newSet.has(productId)) {
-        newSet.delete(productId);
-      } else {
-        newSet.add(productId);
-      }
-      return newSet;
-    });
-  };
-
-  const getTotalCost = () => {
-    if (!results) return 0;
-    return results.matches.reduce((total, match) => {
-      if (!match.selectedProduct?.price_eur || excludedProducts.has(match.selectedProduct.productId)) {
-        return total;
-      }
-      return total + match.selectedProduct.price_eur;
-    }, 0).toFixed(2);
-  };
-
-  const adjustServings = (newServings) => {
-    if (newServings < 1) return;
-    const ratio = newServings / servings;
-    
-    if (!results) return;
-    
-    const adjustedResults = {
-      ...results,
-      servings: newServings,
-      matches: results.matches.map(match => ({
-        ...match,
-        ingredient: {
-          ...match.ingredient,
-          amount: (match.ingredient.amount * ratio).toFixed(1)
-        }
-      }))
-    };
-    
-    setServings(newServings);
-    setResults(adjustedResults);
-  };
-
-  const exportShoppingList = () => {
-    if (!results) return;
-    
-    const list = [
-      `Liste de courses - ${new Date().toLocaleDateString('fr-FR')}`,
-      `Pour ${results.servings} personnes`,
-      '',
-      ...results.matches
-        .filter(m => !excludedProducts.has(m.selectedProduct?.productId))
-        .map(m => {
-          if (!m.selectedProduct) return `${m.ingredient.name} - Produit non trouvé`;
-          return `${m.selectedProduct.name} - ${m.ingredient.amount}${m.ingredient.unit} - €${m.selectedProduct.price_eur?.toFixed(2)}`;
-        }),
-      '',
-      `Total: €${getTotalCost()}`
-    ].join('\n');
-    
-    const blob = new Blob([list], { type: 'text/plain' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'liste-courses.txt';
-    a.click();
-  };
+  // Loading state
+  if (loading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <div className="text-center space-y-4">
+          <Loader2 className="h-8 w-8 animate-spin mx-auto" />
+          <p className="text-lg text-gray-600">Chargement des données...</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-blue-50 to-white">
@@ -256,7 +461,6 @@ const RecipePage = () => {
                         variant="outline"
                         onClick={() => {
                           setRecipe(example.content);
-                          // Close dialog automatically
                         }}
                       >
                         {example.name}
@@ -355,70 +559,7 @@ const RecipePage = () => {
             </Card>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {results.matches.map((match, index) => (
-                <Card 
-                  key={index}
-                  className={`border-0 shadow-md transition-all duration-200 ${
-                    excludedProducts.has(match.selectedProduct?.productId) 
-                      ? 'opacity-50' 
-                      : ''
-                  }`}
-                >
-                  <CardContent className="p-4">
-                    <div className="flex justify-between items-start mb-3">
-                      <div>
-                        <h3 className="font-medium text-lg">
-                          {match.ingredient.name}
-                        </h3>
-                        <p className="text-gray-500">
-                          {match.ingredient.amount} {match.ingredient.unit}
-                        </p>
-                      </div>
-                      
-                      {match.selectedProduct && (
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => toggleExcludeProduct(match.selectedProduct.productId)}
-                          className="text-gray-500 hover:text-gray-700"
-                        >
-                          <X className="h-4 w-4" />
-                        </Button>
-                      )}
-                    </div>
-
-                    {match.selectedProduct ? (
-                      <div className="flex items-center gap-4">
-                        {match.selectedProduct.image_src && (
-                          <img
-                            src={match.selectedProduct.image_src}
-                            alt={match.selectedProduct.name}
-                            className="w-20 h-20 object-cover rounded-lg border border-gray-100"
-                          />
-                        )}
-                        
-                        <div className="flex-1">
-                          <p className="text-sm text-gray-600 mb-1">
-                            {match.selectedProduct.name}
-                          </p>
-                          <p className="text-lg font-semibold text-blue-600">
-                            €{match.selectedProduct.price_eur?.toFixed(2)}
-                          </p>
-                          {!match.compatible && (
-                            <p className="text-yellow-600 text-sm mt-1 flex items-center gap-1">
-                              ⚠️ Quantité différente disponible
-                            </p>
-                          )}
-                        </div>
-                      </div>
-                    ) : (
-                      <div className="bg-red-50 text-red-600 rounded-lg p-3 text-sm">
-                        Produit non trouvé
-                      </div>
-                    )}
-                  </CardContent>
-                </Card>
-              ))}
+              {results?.matches.map((match, index) => renderProductCard(match, index))}
             </div>
           </div>
         )}
