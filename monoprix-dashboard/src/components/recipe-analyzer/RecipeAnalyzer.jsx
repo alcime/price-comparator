@@ -21,7 +21,7 @@ const RecipeAnalyzer = ({ products }) => {
     setDebug(null);
     
     try {
-      // Step 1: Parse recipe into ingredients
+      // Step 1: Parse recipe into ingredients with enhanced data
       const parseResponse = await fetch('http://localhost:3000/api/parse-recipe', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -34,11 +34,19 @@ const RecipeAnalyzer = ({ products }) => {
         throw new Error(`Failed to parse recipe: ${errorData.error}${errorData.details ? '\nDetails: ' + JSON.stringify(errorData.details) : ''}`);
       }
       
-      const { ingredients, servings } = await parseResponse.json();
-      setDebug(prev => ({ ...prev, ingredients }));
+      // Extract the enhanced recipe data
+      const recipeData = await parseResponse.json();
+      const { ingredients, servings, title, recipeType, cuisineOrigin } = recipeData;
+      
+      setDebug(prev => ({ 
+        ...prev, 
+        ingredients,
+        recipeInfo: { title, recipeType, cuisineOrigin, servings }
+      }));
       
       // Step 2: Process each ingredient
       const matchPromises = ingredients.map(async ingredient => {
+        // Get ingredient categories with our enhanced endpoint
         const categoryResponse = await fetch('http://localhost:3000/api/suggest-category', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -58,25 +66,46 @@ const RecipeAnalyzer = ({ products }) => {
           categories: { ...(prev?.categories || {}), [ingredient.name]: categories } 
         }));
         
-        // Try each category until we find products
+        // Try each category until we find candidate products
         let candidateProducts = [];
         let usedCategory = null;
         
         for (const category of categories) {
-          candidateProducts = products
-            .filter(product => 
-              product.main_category === category && 
-              product.name.toLowerCase().includes(ingredient.name.toLowerCase())
-            )
-            .slice(0, 10);
+          // Get products from this category (improved filtering by considering possible alternatives)
+          let categoryProducts = products.filter(product => product.main_category === category);
           
+          // First try exact name matches
+          candidateProducts = categoryProducts.filter(product => 
+            product.name?.toLowerCase().includes(ingredient.name.toLowerCase())
+          );
+          
+          // If we don't have enough matches, try alternatives
+          if (candidateProducts.length < 5 && ingredient.possibleAlternatives) {
+            for (const alternative of ingredient.possibleAlternatives) {
+              const altMatches = categoryProducts.filter(product => 
+                product.name?.toLowerCase().includes(alternative.toLowerCase())
+              );
+              candidateProducts = [...candidateProducts, ...altMatches];
+              if (candidateProducts.length >= 10) break;
+            }
+          }
+          
+          // Limit results and move to next step if we have enough
+          candidateProducts = candidateProducts.slice(0, 10);
           if (candidateProducts.length > 0) {
             usedCategory = category;
             break;
           }
         }
         
-        // Final matching with LLM
+        // If we still don't have candidates, try broader search
+        if (candidateProducts.length === 0) {
+          candidateProducts = products
+            .filter(product => product.name?.toLowerCase().includes(ingredient.name.toLowerCase()))
+            .slice(0, 10);
+        }
+        
+        // Final matching with enhanced LLM endpoint
         const matchResponse = await fetch('http://localhost:3000/api/select-product', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -94,7 +123,8 @@ const RecipeAnalyzer = ({ products }) => {
         return {
           ...match,
           ingredient,
-          category: usedCategory || categories[0]
+          category: usedCategory || categories[0],
+          isCritical: ingredient.isCritical || true
         };
       });
       
@@ -149,59 +179,126 @@ const RecipeAnalyzer = ({ products }) => {
             </Alert>
           )}
 
-          {matchedProducts && (
-            <Dialog>
-              <DialogTrigger asChild>
-                <Button variant="outline" className="w-full">
-                  View Detailed Analysis (€{getTotalCost()})
-                </Button>
-              </DialogTrigger>
-              <DialogContent className="max-w-4xl">
-                <DialogHeader>
-                  <DialogTitle>Recipe Analysis Results</DialogTitle>
-                </DialogHeader>
-                <div className="max-h-[60vh] overflow-y-auto">
-                  <Table>
-                    <TableHeader>
-                      <TableRow>
-                        <TableHead>Ingredient</TableHead>
-                        <TableHead>Amount</TableHead>
-                        <TableHead>Category</TableHead>
-                        <TableHead>Matched Product</TableHead>
-                        <TableHead className="text-right">Price</TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {matchedProducts.map((match, index) => (
-                        <TableRow key={index}>
-                          <TableCell>{match.ingredient.name}</TableCell>
-                          <TableCell>
-                            {match.ingredient.amount} {match.ingredient.unit}
-                          </TableCell>
-                          <TableCell>{match.category}</TableCell>
-                          <TableCell>
-                            {match.selectedProduct?.name || 'No match found'}
-                            {match.selectedProduct && (
-                              <div className="text-sm text-gray-500">
-                                Confidence: {(match.confidence * 100).toFixed(1)}%
-                                {!match.compatible && (
-                                  <span className="text-yellow-500 ml-2">
-                                    ⚠️ Quantity mismatch
-                                  </span>
-                                )}
-                              </div>
-                            )}
-                          </TableCell>
-                          <TableCell className="text-right">
-                            {match.selectedProduct?.price_eur?.toFixed(2) || '-'}€
-                          </TableCell>
+          {matchedProducts && debug?.recipeInfo && (
+            <>
+              {/* Recipe information card */}
+              <Card className="bg-gradient-to-r from-indigo-50 to-blue-50 border-0 shadow-sm">
+                <CardContent className="p-4 sm:p-6">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div>
+                      <h3 className="text-lg font-semibold text-blue-700">
+                        {debug.recipeInfo.title || "Recipe Analysis"}
+                      </h3>
+                      <div className="flex items-center gap-2 mt-1">
+                        <span className="text-sm px-2 py-0.5 bg-blue-100 text-blue-800 rounded-full">
+                          {debug.recipeInfo.recipeType || "Recipe"}
+                        </span>
+                        {debug.recipeInfo.cuisineOrigin && (
+                          <span className="text-sm px-2 py-0.5 bg-indigo-100 text-indigo-800 rounded-full">
+                            {debug.recipeInfo.cuisineOrigin}
+                          </span>
+                        )}
+                        <span className="text-sm px-2 py-0.5 bg-green-100 text-green-800 rounded-full">
+                          {debug.recipeInfo.servings} servings
+                        </span>
+                      </div>
+                    </div>
+                    <div className="flex justify-end items-center">
+                      <div className="text-right">
+                        <div className="text-sm text-gray-600">Total Cost</div>
+                        <div className="text-2xl font-bold text-blue-700">
+                          €{getTotalCost()}
+                        </div>
+                        <div className="text-sm text-gray-600">
+                          €{(getTotalCost() / debug.recipeInfo.servings).toFixed(2)} per serving
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+
+              <Dialog>
+                <DialogTrigger asChild>
+                  <Button variant="outline" className="w-full">
+                    View Detailed Analysis
+                  </Button>
+                </DialogTrigger>
+                <DialogContent className="max-w-4xl">
+                  <DialogHeader>
+                    <DialogTitle>Recipe Analysis Results: {debug.recipeInfo.title || "Recipe"}</DialogTitle>
+                  </DialogHeader>
+                  <div className="max-h-[60vh] overflow-y-auto">
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead>Ingredient</TableHead>
+                          <TableHead>Amount</TableHead>
+                          <TableHead>Category</TableHead>
+                          <TableHead>Matched Product</TableHead>
+                          <TableHead className="text-right">Price</TableHead>
                         </TableRow>
-                      ))}
-                    </TableBody>
-                  </Table>
-                </div>
-              </DialogContent>
-            </Dialog>
+                      </TableHeader>
+                      <TableBody>
+                        {matchedProducts.map((match, index) => (
+                          <TableRow 
+                            key={index}
+                            className={match.ingredient.isCritical === false ? "bg-gray-50 text-gray-500" : ""}
+                          >
+                            <TableCell>
+                              {match.ingredient.name}
+                              {match.ingredient.isCritical === false && (
+                                <span className="text-xs ml-2 text-gray-500">(optional)</span>
+                              )}
+                            </TableCell>
+                            <TableCell>
+                              {match.ingredient.amount} {match.ingredient.unit}
+                            </TableCell>
+                            <TableCell>{match.category}</TableCell>
+                            <TableCell>
+                              {match.selectedProduct?.name || 'No match found'}
+                              {match.selectedProduct && (
+                                <div className="flex flex-col gap-1 mt-1">
+                                  <div className="flex items-center gap-2">
+                                    <div className="w-20 h-1.5 bg-gray-200 rounded-full overflow-hidden">
+                                      <div 
+                                        className={`h-full rounded-full ${
+                                          match.confidence > 0.8 ? 'bg-green-500' : 
+                                          match.confidence > 0.5 ? 'bg-yellow-500' : 'bg-red-500'
+                                        }`}
+                                        style={{ width: `${match.confidence * 100}%` }}
+                                      ></div>
+                                    </div>
+                                    <span className="text-xs text-gray-500">
+                                      {Math.round(match.confidence * 100)}%
+                                    </span>
+                                  </div>
+                                  
+                                  {!match.compatible && (
+                                    <span className="text-yellow-500 text-xs flex items-center">
+                                      ⚠️ Quantity mismatch
+                                    </span>
+                                  )}
+                                  
+                                  {match.substitutionNotes && (
+                                    <span className="text-blue-500 text-xs flex items-center">
+                                      ℹ️ {match.substitutionNotes}
+                                    </span>
+                                  )}
+                                </div>
+                              )}
+                            </TableCell>
+                            <TableCell className="text-right">
+                              {match.selectedProduct?.price_eur?.toFixed(2) || '-'}€
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </div>
+                </DialogContent>
+              </Dialog>
+            </>
           )}
           
           {debug && (
